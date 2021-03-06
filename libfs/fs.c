@@ -1,3 +1,4 @@
+//from github
 
 #include <assert.h>
 #include <stdio.h>
@@ -7,11 +8,13 @@
 
 #include "disk.h"
 #include "fs.h"
+/* TODO: Phase 1 */
+//need to put packed but was throwing error
 #define FAT_EOC 0xFFFF
 
 struct superblock
 {
-	char __attribute__ ((packed)) signature[8];	   // = “ECS150FS”; //name of file system
+	char signature[8];	   // = “ECS150FS”; //name of file system
 	uint16_t totalBlk;	   //total amount of blocks of virtual disk
 	uint16_t rootDirIndex; //root directory block index
 	uint16_t dataBlkStart; //data block start index
@@ -20,7 +23,7 @@ struct superblock
 	char unused[4079];	   //unused padding
 };
 
-struct __attribute__ ((packed)) rootDirectory
+struct rootDirectory
 {
 	char filename[16]; //set these values as constants later
 	uint32_t fileSize;
@@ -46,7 +49,7 @@ int fat_free_blk();
 int rd_free_blk();
 int next_fat_free_blk();
 int allocate_new(int dbNum, int currBlkIndex);
-int ceiling(int offset);
+int get_blk_num(int offset);
 int offset_index(uint16_t firstDB, int offset);
 
 int fs_mount(const char *diskname)
@@ -236,7 +239,7 @@ int fs_delete(const char *filename)
 			if (rd_array[i].fileSize != 0)
 			{
 				size_t filesize = rd_array[i].fileSize;
-				int blkNum = ceiling(filesize);
+				int blkNum = get_blk_num(filesize);
 				uint16_t curr = rd_array[i].firstDataBlk;
 				uint16_t next = 0;
 				for(int i=0; i<blkNum; i++)
@@ -432,7 +435,6 @@ int fs_write(int fd, void *buf, size_t count)
 		return -1;
 	}
 
-	
 	int rdIndex = 0;
 	for (int i = 0; i < FS_FILE_MAX_COUNT; i++)
 	{
@@ -446,17 +448,19 @@ int fs_write(int fd, void *buf, size_t count)
 	int firstDB = rd_array[rdIndex].firstDataBlk;
 	int filesize = rd_array[rdIndex].fileSize;
 
-	int currDBNum = ceiling(filesize);
+	int currDBNum = get_blk_num(filesize);
 	int startOffset = fdTable[fd].offset;
-	int startDBNum = ceiling(startOffset);
+	int startDBNum = get_blk_num(startOffset);
+	if(startOffset%BLOCK_SIZE != 0){
+		startDBNum --;
+	}
 	int endOffset = startOffset + count;
-	int endDBNum = ceiling(endOffset);
+	int endDBNum = get_blk_num(endOffset);
 	//if block number being extended, then it's extending write, need to allocate new
 	int allocatedBlkNum = 0;
 	int blkNum = 0;
 	int allocate_flag = 0;
 	int currBlkIndex = 0;
-	char *bounceBuf = malloc(BLOCK_SIZE);
 	//need allocation
 	if (endDBNum > currDBNum)
 	{
@@ -476,13 +480,10 @@ int fs_write(int fd, void *buf, size_t count)
 		{
 			currBlkIndex = offset_index(firstDB, filesize);
 		}
-		//printf("allocateBlkNum = %d\n", allocateBlkNum);
 		allocatedBlkNum += allocate_new(allocateBlkNum, currBlkIndex);
-		//printf("allocatedBlkNum = %d\n", allocatedBlkNum);
 	}
 	else if (endDBNum < currDBNum)
 	{
-		//do not need allocation
 		blkNum = endDBNum - startDBNum;
 	}
 
@@ -495,7 +496,6 @@ int fs_write(int fd, void *buf, size_t count)
 	if (allocate_flag == 1 && allocatedBlkNum == endDBNum - currDBNum)
 	{
 		//successfully allocate that much
-		//printf("%s\n", "please print");
 		blkNum = endDBNum - startDBNum;
 	}
 	else if (allocate_flag == 1 && allocatedBlkNum != endDBNum - currDBNum)
@@ -510,52 +510,44 @@ int fs_write(int fd, void *buf, size_t count)
 	int startBlkIndex = offset_index(firstDB, startOffset);
 	uint16_t curr = startBlkIndex;
 	int blkIndex = 0;
-	int written = 0;
-	int bufPointer = startOffset + endOffset;
-	//printf("blkNum = %d\n", blkNum);
-	int writeLen = 0;
-	//question to ask, when do we need to worry about race condition
-	for (int i = blkNum-1; i >= 0; i--)
+	int bufPointer = 0;
+	int start = startOffset;
+	int writeLen = Ret;
+	int leftLen = 0;
+	int cutOffset = endOffset - endOffset%BLOCK_SIZE;
+	for (int i = 0; i < blkNum; i++)
 	{
-		//writeLen can be what?
-		writeLen = startOffset + endOffset - BLOCK_SIZE * i;
-		//int writeLen = 0;
-
-
-		if(fat_array[curr] != FAT_EOC){
-			blkIndex = curr;
-			//printf("%s\n", "where it was crashing");
-			//printf("%d\n", curr);
-			curr = fat_array[curr];
+		if(i == blkNum-1){
+		//last block
+			writeLen = endOffset - start;
 		}
-
-
+		else{
+			leftLen = cutOffset - (startDBNum + i + 1) * BLOCK_SIZE;
+			writeLen = cutOffset - start - leftLen;
+		}
 		blkIndex = curr;
-		//printf("%s\n", "where it was crashing");
-		//curr = fat_array[curr]; //this line was making a segmentation fault
-
+		curr = fat_array[curr];
+		//buffer write
 		if (writeLen < BLOCK_SIZE)
 		{
+			char *bounceBuf = malloc(BLOCK_SIZE);
 			int checkRd = block_read(blkIndex + sb->dataBlkStart + 1, bounceBuf);
-			memcpy(bounceBuf + startOffset, buf + written, writeLen);
+			memcpy(bounceBuf + start%BLOCK_SIZE, buf + bufPointer, writeLen);
 			block_write(blkIndex + sb->dataBlkStart + 1, bounceBuf);
+			free(bounceBuf);
 		}
+		//direct write
 		else
 		{
-			//printf("%s\n", "direct write");
-			block_write(blkIndex + sb->dataBlkStart + 1, buf + written);
+			block_write(blkIndex + sb->dataBlkStart + 1, buf + bufPointer);
 		}
-		written += writeLen;
+		bufPointer += writeLen;
+		start += writeLen;
 	}
-
 	rd_array[rdIndex].firstDataBlk = firstDB;
-	if(endOffset < filesize){
-		rd_array[rdIndex].fileSize = filesize;
-	}
-	else{
+	if(endOffset > filesize){
 		rd_array[rdIndex].fileSize = endOffset;
 	}
-	//block_write(sb->rootDirIndex, rd_array);
 	fdTable[fd].offset = startOffset + endOffset;
 	return Ret;
 }
@@ -635,6 +627,7 @@ int fs_read(int fd, void *buf, size_t count)
 	return Ret;
 }
 
+
 int fat_free_blk()
 {
 	int freeFat = 0;
@@ -676,6 +669,7 @@ int next_fat_free_blk()
 	return freeFat;
 }
 
+//need to rewrite allocate_new
 int allocate_new(int dbNum, int currBlkIndex)
 {
 	int allocated = 0; //number of new blocks allocated already
@@ -697,7 +691,7 @@ int allocate_new(int dbNum, int currBlkIndex)
 }
 
 //allocates a new data block and link it at the end of the file’s data block chain
-int ceiling(int offset)
+int get_blk_num(int offset)
 {
 	int ret = offset / BLOCK_SIZE;
 	if (ret * BLOCK_SIZE < offset)
@@ -710,9 +704,9 @@ int ceiling(int offset)
 //returns the index of the data block corresponding to the file’s offset
 int offset_index(uint16_t firstDB, int offset)
 {
-	int blkNum = ceiling(offset);
+	int blkNum = get_blk_num(offset);
 	uint16_t curr = firstDB;
-	int blkIndex = 0;
+	int blkIndex = firstDB;
 	for (int i = 0; i < blkNum; i++)
 	{
 		blkIndex = curr;
